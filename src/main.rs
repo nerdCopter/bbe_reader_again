@@ -60,10 +60,12 @@ fn main() -> io::Result<()> {
     println!("\nInternal Column Definitions:");
     for (index, field) in field_definitions.iter().enumerate() {
         println!(
-            "Column {}: Name=\"{}\", Signed={}",
+            "Column {}: Name=\"{}\", Signed={}, Predictor={}, Encoding={}",
             index + 1,
             field.name,
-            field.signed
+            field.signed,
+            field.predictor,
+            field.encoding,
         );
     }
 
@@ -88,12 +90,16 @@ fn main() -> io::Result<()> {
 struct FieldDefinition {
     name: String,
     signed: bool,
+    predictor: u8,
+    encoding: u8,
 }
 
 /// Parses field definitions from the plaintext headers.
 fn parse_field_definitions(headers: &[String]) -> Vec<FieldDefinition> {
     let mut field_names = Vec::new();
     let mut signed_flags = Vec::new();
+    let mut predictor_types = Vec::new();
+    let mut encoding_types = Vec::new();
 
     for header in headers {
         if header.starts_with("H Field I name:") {
@@ -106,6 +112,16 @@ fn parse_field_definitions(headers: &[String]) -> Vec<FieldDefinition> {
                 .split(',')
                 .map(|s| s.trim() == "1")
                 .collect();
+        } else if header.starts_with("H Field I predictor:") {
+            predictor_types = header["H Field I predictor:".len()..]
+                .split(',')
+                .map(|s| s.trim().parse::<u8>().unwrap_or(0))
+                .collect();
+        } else if header.starts_with("H Field I encoding:") {
+            encoding_types = header["H Field I encoding:".len()..]
+                .split(',')
+                .map(|s| s.trim().parse::<u8>().unwrap_or(0))
+                .collect();
         }
     }
 
@@ -116,6 +132,8 @@ fn parse_field_definitions(headers: &[String]) -> Vec<FieldDefinition> {
         .map(|(i, name)| FieldDefinition {
             name,
             signed: *signed_flags.get(i).unwrap_or(&false),
+            predictor: *predictor_types.get(i).unwrap_or(&0),
+            encoding: *encoding_types.get(i).unwrap_or(&0),
         })
         .collect()
 }
@@ -129,50 +147,72 @@ fn decode_binary_data(
     let mut cursor = 0;
 
     while cursor < data.len() {
-        let mut record = vec![];
+        let mut record = Vec::new();
 
-        for field in fields.iter().take(13) { // Only process first 13 columns
+        for field in fields.iter().take(13) {
             if cursor >= data.len() {
                 break;
             }
 
-            if field.signed {
-                record.push(decode_i8(data, &mut cursor).to_string());
-            } else {
-                record.push(decode_u32(data, &mut cursor).to_string());
-            }
+            let value = match field.encoding {
+                0 => read_signed_vlq(data, &mut cursor),
+                1 => read_unsigned_vlq(data, &mut cursor) as i32,
+                _ => 0,
+            };
+            record.push(value.to_string());
         }
 
-        writer.write_record(record)?;
-   }
+        if record.len() == 13 {
+            if let Err(e) = writer.write_record(&record) {
+                eprintln!("CSV write error: {:?}", e);
+                break;
+            }
+        } else {
+            eprintln!(
+                "Warning: Mismatched record length: expected 13, got {}. Cursor position: {}",
+                record.len(),
+                cursor
+            );
+            break;
+        }
+    }
 
-   Ok(())
+    Ok(())
 }
 
-/// Decodes a 32-bit unsigned integer.
-fn decode_u32(data: &[u8], cursor: &mut usize) -> u32 {
-   if *cursor + 4 > data.len() {
-       return 0;
-   }
+/// Reads a signed variable-length quantity (VLQ) from the data buffer.
+fn read_signed_vlq(data: &[u8], cursor: &mut usize) -> i32 {
+    let value = read_unsigned_vlq(data, cursor);
+    let sign = (value & 1) as i32;
+    let magnitude = (value >> 1) as i32;
 
-   let value = u32::from_le_bytes([
-       data[*cursor],
-       data[*cursor + 1],
-       data[*cursor + 2],
-       data[*cursor + 3],
-   ]);
-
-   *cursor += 4;
-   value
+    if sign != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
-/// Decodes an 8-bit signed integer.
-fn decode_i8(data: &[u8], cursor: &mut usize) -> i8 {
-     if *cursor >= data.len() {
-         return 0;
-     }
+/// Reads an unsigned variable-length quantity (VLQ) from the data buffer.
+fn read_unsigned_vlq(data: &[u8], cursor: &mut usize) -> u32 {
+    let mut value: u32 = 0;
+    let mut shift: u32 = 0;
 
-     let value = data[*cursor] as i8;
-     *cursor += 1;
-     value
+    loop {
+        if *cursor >= data.len() {
+            break;
+        }
+
+        let byte = data[*cursor] as u32;
+        *cursor += 1;
+
+        value |= (byte & 0x7F) << shift;
+        shift += 7;
+
+        if (byte & 0x80) == 0 {
+            break;
+        }
+    }
+
+    value
 }
