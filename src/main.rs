@@ -1,9 +1,10 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader, BufRead, Read};
+use csv::Writer;
 
 #[derive(Parser, Debug)]
-#[clap(author = "Your Name", version = "1.0", about = "BBL File Reader with Binary Decoding")]
+#[clap(author = "Your Name", version = "0.1.0", about = "BBL File Reader with CSV Output")]
 struct Args {
     /// Input .BBL file
     #[clap(short, long)]
@@ -13,7 +14,32 @@ struct Args {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    // Open the file
+    // Determine output CSV file name
+    let input_path = std::path::Path::new(&args.input);
+    let file_stem = input_path.file_stem().unwrap().to_str().unwrap();
+    let csv_file_name = format!("{}.csv", file_stem);
+
+    // Create CSV writer
+    let mut writer = Writer::from_path(csv_file_name)?;
+
+    // Write CSV header
+    writer.write_record(&[
+        "loopIteration",
+        "time",
+        "P[0]",
+        "P[1]",
+        "P[2]",
+        "I[0]",
+        "I[1]",
+        "I[2]",
+        "D[0]",
+        "D[1]",
+        "FF[0]",
+        "FF[1]",
+        "FF[2]",
+    ])?;
+
+    // Open the BBL file
     let file = File::open(&args.input)?;
     let mut reader = BufReader::new(file);
 
@@ -50,8 +76,10 @@ fn main() -> io::Result<()> {
     // Parse field definitions from headers
     let field_definitions = parse_field_definitions(&headers);
 
-    // Decode binary data using field definitions
-    decode_binary_data(&buffer, &field_definitions);
+    // Decode binary data and write to CSV
+    decode_binary_data(&buffer, &field_definitions, &mut writer)?;
+
+    writer.flush()?; // Ensure all data is written to the file
 
     Ok(())
 }
@@ -92,27 +120,89 @@ fn parse_field_definitions(headers: &[String]) -> Vec<FieldDefinition> {
         .collect()
 }
 
-/// Decodes binary data using the given field definitions.
-fn decode_binary_data(data: &[u8], fields: &[FieldDefinition]) {
-    println!("\nDecoded Data:");
-
+/// Decodes binary data and writes loopIteration, time, P, I, D, FF for each axis to CSV.
+fn decode_binary_data(data: &[u8], fields: &[FieldDefinition], writer: &mut Writer<File>) -> io::Result<()> {
     let mut cursor = 0;
 
     while cursor < data.len() {
-        println!("Record:");
+        // Find indices for loopIteration, time, and each axis' P, I, D, FF values
+        let loop_iteration_index = fields.iter().position(|f| f.name == "loopIteration");
+        let time_index = fields.iter().position(|f| f.name == "time");
 
-        for field in fields {
-            if cursor >= data.len() {
-                break;
-            }
+        // Axis-specific fields
+        let p_indices: Vec<_> = (0..3)
+            .map(|i| fields.iter().position(|f| f.name == format!("axisP[{}]", i)))
+            .collect();
 
-            // Decode based on signed flag
-            let value = decode_fixed(data, &mut cursor, field.signed);
-            println!("  {}: {}", field.name, value);
-        }
+        let i_indices: Vec<_> = (0..3)
+            .map(|i| fields.iter().position(|f| f.name == format!("axisI[{}]", i)))
+            .collect();
 
-        println!(); // Separate records with a blank line
+        let d_indices: Vec<_> = (0..2)
+            .map(|i| fields.iter().position(|f| f.name == format!("axisD[{}]", i)))
+            .collect();
+
+        let ff_indices: Vec<_> = (0..3)
+            .map(|i| fields.iter().position(|f| f.name == format!("axisF[{}]", i)))
+            .collect();
+
+        // Decode values for each field based on their index
+        let loop_iteration_value =
+            decode_field(data, &mut cursor, loop_iteration_index.map_or(0, |index| index), fields);
+
+        let time_value =
+            decode_field(data, &mut cursor, time_index.map_or(0, |index| index), fields);
+
+        let p_values: Vec<_> = p_indices
+            .iter()
+            .map(|&index| decode_field(data, &mut cursor, index.unwrap_or(0), fields))
+            .collect();
+
+        let i_values: Vec<_> = i_indices
+            .iter()
+            .map(|&index| decode_field(data, &mut cursor, index.unwrap_or(0), fields))
+            .collect();
+
+        let d_values: Vec<_> = d_indices
+            .iter()
+            .map(|&index| decode_field(data, &mut cursor, index.unwrap_or(0), fields))
+            .collect();
+
+        let ff_values: Vec<_> = ff_indices
+            .iter()
+            .map(|&index| decode_field(data, &mut cursor, index.unwrap_or(0), fields))
+            .collect();
+
+        // Write values to CSV
+        writer.write_record(&[
+            loop_iteration_value.to_string(),
+            time_value.to_string(),
+            p_values[0].to_string(),
+            p_values[1].to_string(),
+            p_values[2].to_string(),
+            i_values[0].to_string(),
+            i_values[1].to_string(),
+            i_values[2].to_string(),
+            d_values.get(0).unwrap_or(&0).to_string(),
+            d_values.get(1).unwrap_or(&0).to_string(),
+            ff_values[0].to_string(),
+            ff_values[1].to_string(),
+            ff_values[2].to_string(),
+        ])?;
+
+        cursor += 1; // Move cursor to next record (adjust based on actual record size)
     }
+
+    Ok(())
+}
+
+/// Decodes a single field based on its index and signedness.
+fn decode_field(data: &[u8], cursor: &mut usize, index: usize, fields: &[FieldDefinition]) -> i32 {
+    if *cursor >= data.len() || index >= fields.len() {
+        return 0;
+    }
+
+    decode_fixed(data, cursor, fields[index].signed)
 }
 
 /// Decodes a fixed-width integer (e.g., 8-bit or 16-bit).

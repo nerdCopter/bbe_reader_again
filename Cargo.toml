@@ -1,7 +1,8 @@
 [package]
-name = "blackbox_analyzer"
+name = "bbe_reader_again"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
+csv = "1.1"
